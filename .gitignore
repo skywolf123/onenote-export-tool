@@ -1,9 +1,6 @@
-# Sync state and cache
-.onenote-sync-manifest.json
+# 增量记录（脚本生成，不应提交）
+.onenote-export-manifest.json
 *.log
-
-# Dependencies
-node_modules/
 
 # OS specific
 Thumbs.db

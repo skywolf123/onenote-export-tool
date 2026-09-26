@@ -1,69 +1,151 @@
-# OneNote Vault Sync
+# OneNote Export Tool
 
-High-speed incremental synchronization between Microsoft OneNote and Obsidian using native Windows OneNote COM automation.
+把本机 OneNote 笔记本导出成 Markdown 文件夹树，用于导入 WeKnora 等知识库。
 
-## Overview
+通过官方 OneNote COM 接口（`OneNote.Application`）直接读取本机已同步的笔记，
+不解析 `.one` 二进制、不依赖任何第三方 `exe`、无需网络与账号。
 
-Unlike external binary converters or exporters, this solution interacts directly with the local Microsoft OneNote Desktop application through the official OneNote COM interface (`OneNote.Application`).
+## 输出结构
 
-### Advantages
-- **No Third-Party Binaries**: Works without standalone `.exe` tools, avoiding blocks by Windows Smart App Control, AppLocker, or Device Guard.
-- **Fast Incremental Sync**: Evaluates page hierarchy and modification timestamps in under 1 second. Only new or modified pages are processed.
-- **Accurate Markdown Conversion**: Converts outlines, multi-level lists, Markdown tables, and embedded images.
-- **Dynamic Asset Paths**: Automatically calculates relative image links depending on folder nesting depth, ensuring images render properly in Obsidian.
-- **Obsidian Integration**: Trigger synchronization directly via the Obsidian command palette (`Ctrl + P`).
-
-## Architecture
-
-The project consists of two components:
-1. **PowerShell Engine (`scripts/sync-onenote.ps1`)**:
-   - Communicates with OneNote via COM in Single-Threaded Apartment mode (`-STA`).
-   - Maintains a local synchronization manifest (`.onenote-sync-manifest.json`).
-   - Exports pages into `OneNote/<Notebook>/<Section>/<Page>.md`.
-   - Extracts embedded base64 images into `OneNote/Assets/` and references them with correct relative Markdown links.
-2. **Obsidian Plugin (`main.js`, `manifest.json`)**:
-   - Registers the command `OneNote: Vault synchronisieren`.
-   - Executes the sync script asynchronously in the background.
-   - Shows status notices upon completion.
-
-## Requirements
-- Windows 10 or Windows 11
-- Microsoft OneNote (Desktop version, 32-bit or 64-bit)
-- Windows PowerShell 5.1 (standard built-in Windows component)
-- Obsidian (desktop app)
-
-## Installation
-
-### Option 1: As an Obsidian Plugin
-1. Create a folder named `obsidian-onenote-sync` inside your vault's `.obsidian/plugins/` directory.
-2. Copy `manifest.json`, `main.js`, and the `scripts/` folder into that directory.
-3. Reload Obsidian and enable **OneNote Vault Sync** under Community Plugins.
-4. Press `Ctrl + P` and execute `OneNote: Vault synchronisieren`.
-
-### Option 2: Standalone / CLI
-Run the script from PowerShell or Command Prompt:
-
-```powershell
-& "scripts/sync-onenote.cmd"
+```
+<输出目录>/
+└── 笔记本名/
+    └── 分区组名/          ← 若有
+        └── 分区名/
+            ├── 页面.md
+            └── 父页面/     ← 子页面（pageLevel > 1）嵌套成子文件夹
+                └── 子页面.md
 ```
 
-To sync a specific notebook or section:
+笔记本 / 分区组（可嵌套）/ 分区 / 页面分别映射为目录层级，子页面成为父页面同名的子文件夹。
+
+## 与上游版本的区别
+
+本仓库 fork 自 [QR4X/obsidian-onenote-sync](https://github.com/QR4X/obsidian-onenote-sync)
+（MIT），为「导入知识库」这一用途做了实质改造：
+
+| 改动 | 说明 |
+| :--- | :--- |
+| **图片内联为 data URI** | 不再旁挂 `Assets/` 目录 + 相对路径。知识库按「每个 `.md` 一个条目」入库，相对路径引用的兄弟图片文件不会被关联，会直接断链 |
+| **手写笔迹提取** | 读取 `InkWord@recognizedText`（OneNote 自己的手写识别结果，微软文档未记录该属性），使手写内容可被文本检索 |
+| **手绘图渲染** | `InkDrawing` 的 ISF 笔画数据经 WPF `StrokeCollection` 渲染成 PNG。**不用** Tablet PC 的 `Microsoft.Ink` COM 类 —— 它在 Windows 11 上默认不再注册（`80040154 REGDB_E_CLASSNOTREG`） |
+| **图文合成** | 标注（ink）与其底图合成**同一张 PNG**：按页面绝对坐标把图片和笔画画进同一个 `DrawingVisual`。逐元素渲染会让标注与底图分离，而逐元素居中则会破坏笔画之间的相对位置 |
+| **中文界面** | 输出信息、错误提示、无标题页的兜底命名全部本地化 |
+| **移除 Obsidian 集成** | 删除插件壳（`main.js` / `manifest.json` / `package.json`）与单页导出脚本 |
+| **不再删除旧文件** | 保留"跳过未变化页面"的增量能力，但去掉改名/删除时清理旧文件的行为 —— 对"导出一个目录去上传"的用途无意义且有误删风险 |
+
+## 环境要求
+
+- Windows 10 / 11
+- **OneNote 桌面版**（2016 / 2019 / 2021 / M365）
+  - Microsoft Store 版「OneNote for Windows 10」**不可用** —— 它不暴露任何自动化接口
+- Windows PowerShell 5.1（系统自带）
+- 需在交互式桌面会话中运行（Office 自动化不支持以服务方式运行）
+
+## 用法
 
 ```powershell
-& "scripts/sync-onenote.cmd" -Notebook "My Notebook" -Section "Work"
+# 查看帮助
+.\scripts\sync-onenote.cmd -Help
+
+# 先看本机有哪些笔记本（不知道确切名称时用这个）
+.\scripts\sync-onenote.cmd -ListNotebooks
+
+# 再看会导出哪些页面，不写文件
+.\scripts\sync-onenote.cmd -List -Notebook "工作"
+
+# 导出指定笔记本
+.\scripts\sync-onenote.cmd -OutputPath D:\onenote-export -Notebook "工作"
+
+# 只导出某个分区
+.\scripts\sync-onenote.cmd -OutputPath D:\onenote-export -Section "会议记录"
+
+# 强制全量重导（忽略增量记录）
+.\scripts\sync-onenote.cmd -OutputPath D:\onenote-export -Force
 ```
 
-To force re-exporting all pages:
+若脚本因执行策略被拒，用 `.\scripts\sync-onenote.cmd`（包装脚本自带
+`-ExecutionPolicy Bypass`）或对当前会话放宽：
 
 ```powershell
-& "scripts/sync-onenote.cmd" -Force
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-To list all pages and status without exporting:
+### 参数
 
-```powershell
-& "scripts/sync-onenote.cmd" -List
-```
+**日常使用**
 
-## License
-MIT License
+| 参数 | 说明 |
+| :--- | :--- |
+| `-Help` | 打印参数说明与示例 |
+| `-ListNotebooks` | 列出本机所有笔记本（含分区数、页面数），不写文件 |
+| `-List` | 列出会被导出的页面与相对路径，不写文件 |
+| `-OutputPath` | 导出根目录，不存在则创建（除非用上面两个 `-List*`） |
+| `-Notebook` | 只导出指定笔记本（名称精确匹配，先用 `-ListNotebooks` 查） |
+| `-Section` | 只导出指定分区，可与 `-Notebook` 组合 |
+| `-Force` | 忽略增量记录，强制全部重导 |
+
+**调参（一般不需要动）**
+
+| 参数 | 说明 |
+| :--- | :--- |
+| `-SkipInkImages` | 跳过手绘渲染（手写识别文本仍会提取） |
+| `-InkToleranceRatio` | ink 归属容差，相对容器宽度的比例，默认 `0.5`（半宽） |
+| `-InkGapThreshold` | 纯 ink 聚类的纵向间距阈值（页面坐标），默认 `50`。笔记写得越疏，该值应越大 |
+
+**调试**
+
+| 参数 | 说明 |
+| :--- | :--- |
+| `-DumpXml` | 把原始页面 XML 写到 `<输出目录>/_xml/`，用于排查坐标/ink 问题。**这些 `.xml` 不是给知识库导入的，别和 `.md` 混在一起上传** |
+
+## 导入 WeKnora
+
+用知识库的「上传文件夹」入口，选导出的目录即可 —— **不要用 CLI 的
+`doc upload --recursive`**，后者不构造相对路径，层级会丢失。
+
+「上传文件夹」会把浏览器给出的相对路径拼进 `fileName` 字段，后端据此拆出
+`folder_path`，从而还原成知识库的文件夹树。
+
+## 实现要点
+
+几处容易踩坑、值得记录的地方：
+
+**PowerShell 集合返回值会被展平。** 输出管道会递归枚举 `IEnumerable`，
+`return $list` 会把 `List[byte[]]` 拆成一个个 `byte`，`return $bytes` 会把字节
+数组拆成单字节。因此集合一律用**填充式**（写入调用方给的容器），单个
+`byte[]` 返回值则必须写 `return , $bytes`（unary comma）。这类 bug 的症状是
+`InkSerializedFormat 操作失败（1 字节）` 刷屏 —— 几百字节的 ISF 被拆成了几百个单字节。
+
+**XPath 的 `.//x` 不匹配上下文节点自身。** 它展开为
+`descendant-or-self::node()/child::x`，而 `InkDrawing` 内部不会嵌套
+`InkDrawing`，所以从 ink 节点出发查找时必须单独判断自身。
+
+**ISF 内部坐标与页面坐标不是 1:1。** 实测比值约 1.35，且与版本相关。渲染时
+必须用 ink 的 XML `Position`/`Size` 做锚点，把 ISF 包围盒**仿射映射**到页面
+坐标，而不是硬编码缩放常数 —— 否则与图片叠加时会错位。
+
+**手绘必须整块合并渲染。** OneNote 把一次手写拆成多个 `InkDrawing`，每个
+带独立的绝对坐标。逐元素按各自包围盒居中渲染会丢掉笔画间的相对位置，
+一个字会散成一列孤立笔画图。
+
+**增量的比较基准要用"簇迄今最大 bottom"**，不是"最后一笔的 bottom" ——
+笔画在 OneNote 里可能不按 y 顺序排列，用后者会把本该同簇的笔画切断。
+
+## 已知限制
+
+- **手绘图形无法被文本检索**。OneNote 只为「手写文字」保留识别结果
+  （`InkWord@recognizedText`），手绘的示意图/涂鸦只有笔画数据，
+  渲染成图后只能靠知识库的图片描述（caption）被间接检索到。
+- **加密内容读不到**。密码保护的分区在 OneNote 中本就是锁定状态，
+  COM 拿不到内容，导出时会缺失。
+- **`recognizedText` 的填充率取决于 OneNote 的识别情况** —— 通常是 Windows
+  版 OneNote 写过的手写才有识别数据；其他平台同步过来的手写可能为空。
+- **每页图片数量上限**：知识库侧对单个文档的图片解析有数量上限（默认 30 张），
+  超过的图片不会被处理。图片极多的页面需自行斟酌。
+- 从 WSL 的 UNC 路径（`\\wsl.localhost\...`）运行会很慢，且可能触发执行策略
+  拒绝，建议复制到本地盘。
+
+## 许可
+
+MIT License。原始项目版权归 Finn / QR4X 所有。
