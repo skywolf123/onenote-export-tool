@@ -40,33 +40,75 @@ foreach ($f in @($cFile, $rcFile, $icon)) {
   }
 }
 
-# 编译器可能装在 PATH 之外（Scoop、winget、MSYS2 的默认位置都不一定进 PATH），
-# 所以除了 Get-Command 之外再扫一遍这些目录兜底。
+# 编译器可能装在 PATH 之外（Git for Windows、Scoop、winget、MSYS2 的默认位置
+# 都不一定进 PATH），也可能整个装在非系统盘，所以除了 Get-Command 之外再扫
+# 一遍常见位置兜底。
 function Get-CandidateToolDirs {
-  $dirs = @(
-    "C:\msys64\mingw64\bin"
-    "C:\msys64\ucrt64\bin"
-    "C:\msys64\clang64\bin"
-    "C:\w64devkit\bin"
-    (Join-Path $env:ProgramFiles "Git\mingw64\bin")
-    (Join-Path $env:ProgramFiles "mingw-w64\mingw64\bin")
-    (Join-Path $env:USERPROFILE "scoop\apps\mingw\current\bin")
-    (Join-Path $env:LOCALAPPDATA "Programs\mingw\bin")
+  $dirs = New-Object System.Collections.Generic.List[string]
+
+  # 由 git.exe 的位置反推：Git for Windows 的 mingw64 通常与 cmd 同级。
+  # 这样即使 Git 装在非系统盘也能找到。
+  try {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($git -and $git.Source) {
+      $gitRoot = Split-Path (Split-Path $git.Source -Parent) -Parent
+      if ($gitRoot) {
+        $dirs.Add((Join-Path $gitRoot "mingw64\bin"))
+        $dirs.Add((Join-Path $gitRoot "usr\bin"))
+      }
+    }
+  } catch { }
+
+  # 每个固定盘符下的常见相对路径。只做固定次数的 Test-Path，不遍历整盘。
+  $relatives = @(
+    "msys64\mingw64\bin"
+    "msys64\ucrt64\bin"
+    "msys64\clang64\bin"
+    "w64devkit\bin"
+    "mingw64\bin"
+    "mingw32\bin"
+    "Program Files\Git\mingw64\bin"
+    "Program Files\mingw-w64\mingw64\bin"
+    "Program Files (x86)\mingw-w64\mingw64\bin"
+    "Tools\mingw64\bin"
+    "Dev\mingw64\bin"
   )
+  $drives = New-Object System.Collections.Generic.List[string]
+  try {
+    foreach ($di in [System.IO.DriveInfo]::GetDrives()) {
+      # 未就绪的驱动器（空光驱、断开的移动盘）访问 IsReady 本身就会抛异常，
+      # 必须逐个兜住，否则整个枚举会中断
+      try {
+        if ($di.DriveType -eq [System.IO.DriveType]::Fixed -and $di.IsReady) {
+          $drives.Add($di.RootDirectory.FullName)
+        }
+      } catch { }
+    }
+  } catch { }
+  foreach ($d in $drives) {
+    foreach ($r in $relatives) { $dirs.Add((Join-Path $d $r)) }
+  }
+
+  # 环境变量指向的位置
+  if ($env:ProgramFiles)        { $dirs.Add((Join-Path $env:ProgramFiles "Git\mingw64\bin")) }
+  if (${env:ProgramFiles(x86)}) { $dirs.Add((Join-Path ${env:ProgramFiles(x86)} "Git\mingw64\bin")) }
+  if ($env:USERPROFILE)         { $dirs.Add((Join-Path $env:USERPROFILE "scoop\apps\mingw\current\bin")) }
+  if ($env:LOCALAPPDATA)        { $dirs.Add((Join-Path $env:LOCALAPPDATA "Programs\mingw\bin")) }
 
   # winget 安装的 winlibs 落在带哈希的包目录里，路径不固定，用通配展开
-  $globs = @(
-    (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\*\mingw64\bin")
-    (Join-Path $env:ProgramFiles "mingw-w64\*\mingw64\bin")
-  )
+  $globs = @()
+  if ($env:LOCALAPPDATA) { $globs += (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\*\mingw64\bin") }
+  if ($env:ProgramFiles) { $globs += (Join-Path $env:ProgramFiles "mingw-w64\*\mingw64\bin") }
   foreach ($g in $globs) {
     try {
-      $dirs += @(Get-ChildItem -Path $g -Directory -ErrorAction SilentlyContinue |
-                 ForEach-Object { $_.FullName })
+      foreach ($hit in @(Get-ChildItem -Path $g -Directory -ErrorAction SilentlyContinue)) {
+        $dirs.Add($hit.FullName)
+      }
     } catch { }
   }
 
-  return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+  # 去重后只保留真实存在的目录
+  return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
 }
 
 function Find-Tool {
@@ -133,10 +175,11 @@ try {
     Push-Location $here
     try {
       & $windres -I $here -I $tmp -i $rcTmp -o $resObj
+      $resExit = $LASTEXITCODE
     } finally {
       Pop-Location
     }
-    if ($LASTEXITCODE -ne 0) { throw "windres 失败（退出码 $LASTEXITCODE）" }
+    if ($resExit -ne 0) { throw "windres 失败（退出码 $resExit）" }
 
     # -municode：宽字符入口 wWinMain
     # -mwindows：GUI 子系统，不创建控制台
@@ -160,10 +203,11 @@ try {
     Push-Location $here
     try {
       & $rc /nologo /fo $resFile $rcTmp
+      $resExit = $LASTEXITCODE
     } finally {
       Pop-Location
     }
-    if ($LASTEXITCODE -ne 0) { throw "rc 失败（退出码 $LASTEXITCODE）" }
+    if ($resExit -ne 0) { throw "rc 失败（退出码 $resExit）" }
 
     # /O1 体积优先；/MT 静态链接 CRT，避免依赖 VC 运行库
     Push-Location $tmp
@@ -179,8 +223,7 @@ try {
     # cl 会把中间文件写到当前目录，临时目录随用随删，不污染仓库
   }
   else {
-    $searched = @("PATH")
-    $searched += (Get-CandidateToolDirs)
+    $searched = @("PATH") + (Get-CandidateToolDirs)
     $searchedText = ($searched | ForEach-Object { "  " + $_ }) -join "`n"
 
     throw @"
@@ -192,17 +235,20 @@ $searchedText
 请任选一套装好再试：
 
   MinGW-w64（推荐，体积小）
-    - Scoop:  scoop install mingw
     - winget: winget install BrechtSanders.WinLibs.POSIX.UCRT
+              装完请重开一个终端，让 PATH 生效
+    - Scoop:  scoop install mingw
     - MSYS2:  pacman -S mingw-w64-ucrt-x86_64-gcc
     - w64devkit: 解压到 C:\w64devkit 即可，本脚本会自动找到
 
-  已经装了 MinGW-w64 但没被找到？
+  注意：Git for Windows 自带的 MinGW（...\Git\mingw64）不含 windres，
+  只有 gcc 编不过 —— 需要完整的一套 MinGW-w64。
+
+  已经装了但没被找到？
     如果它在别的位置，把该目录加进本次会话的 PATH 再重跑：
       `$env:PATH = "D:\你的\mingw64\bin;`$env:PATH"
       powershell -ExecutionPolicy Bypass -File scripts\launcher\build-exe.ps1
-    注意：如果这个 gcc 不在 PATH 里，脚本也找不到它的 windres，
-    两个工具必须来自同一个 bin 目录。
+    gcc 和 windres 必须来自同一个 bin 目录。
 
   MSVC
     - 安装 Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」
