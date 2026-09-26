@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  从本机 OneNote 桌面版导出笔记为 Markdown 文件夹树（用于导入 WeKnora 等知识库）。
+  从本机 OneNote 桌面版导出笔记为 Markdown 文件夹树（便于导入各类知识库）。
 
 .DESCRIPTION
   通过 OneNote COM 接口直接读取本机已同步的笔记本，按
@@ -113,15 +113,15 @@ OneNote 导出工具 —— 把本机 OneNote 笔记本导出为 Markdown 文件
   子页面（pageLevel > 1）成为父页面同名的子文件夹。
   图片内联为 data URI，手写识别文本以正文形式插入，手绘图渲染成 PNG。
 
-导入 WeKnora:
-  用知识库的「上传文件夹」入口选导出目录 —— 不要用 CLI 的
-  doc upload --recursive，后者不构造相对路径，层级会丢失。
+导入知识库:
+  推荐用知识库的「上传文件夹」入口选导出目录，这样能保留目录层级。
+  用命令行工具逐个文件上传时，部分实现不构造相对路径，层级会丢失。
 "@
   exit 0
 }
 
 
-# WeKnora 侧的限制（internal/types/knowledge_folder.go）：
+# 下游知识库对文件夹路径的常见限制：
 #   单个路径段 <= 128 字节、整条路径 <= 1024 字节、层级 <= 16。
 # 中文一段 3 字节，128 字节约 42 个汉字，因此按字符数保守截断。
 $MaxSegmentChars = 80
@@ -161,7 +161,7 @@ function Clean-HtmlText([string]$html) {
 
 # ── 图片处理 ────────────────────────────────────────────────────────────────
 
-# EMF/WMF 是矢量格式，WeKnora 的 MIME 映射表（extFromMime）没有 emf 分支，
+# EMF/WMF 是矢量格式，下游知识库的 MIME 映射表通常没有 emf 分支，
 # 直接内联会静默丢图，因此必须在导出侧转成位图。
 # 返回 byte[] 时必须用 unary comma（",$bytes"）：PowerShell 的输出管道会枚举
 # IEnumerable，裸 `return $bytes` 会把字节数组拆成一个一个 byte，调用方拿到

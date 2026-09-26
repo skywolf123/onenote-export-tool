@@ -10,3 +10,6 @@ Desktop.ini
 # Editor
 .vscode/
 .idea/
+
+# Serena（本地代码导航配置）
+.serena/

@@ -1,6 +1,6 @@
 # OneNote Export Tool
 
-把本机 OneNote 笔记本导出成 Markdown 文件夹树，用于导入 WeKnora 等知识库。
+把本机 OneNote 笔记本导出成 Markdown 文件夹树，便于导入各类知识库。
 
 通过官方 OneNote COM 接口（`OneNote.Application`）直接读取本机已同步的笔记，
 不解析 `.one` 二进制、不依赖任何第三方 `exe`、无需网络与账号。
@@ -99,10 +99,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | :--- | :--- |
 | `-DumpXml` | 把原始页面 XML 写到 `<输出目录>/_xml/`，用于排查坐标/ink 问题。**这些 `.xml` 不是给知识库导入的，别和 `.md` 混在一起上传** |
 
-## 导入 WeKnora
+## 导入知识库
 
-用知识库的「上传文件夹」入口，选导出的目录即可 —— **不要用 CLI 的
-`doc upload --recursive`**，后者不构造相对路径，层级会丢失。
+推荐走知识库的「上传文件夹」入口，选导出的目录即可，这样能保留目录层级。
+用命令行工具逐个文件上传时，部分实现不构造相对路径，层级会丢失。
 
 「上传文件夹」会把浏览器给出的相对路径拼进 `fileName` 字段，后端据此拆出
 `folder_path`，从而还原成知识库的文件夹树。
