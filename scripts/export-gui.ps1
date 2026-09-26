@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 
 try {
   Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
-  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 } catch {
   [System.Windows.MessageBox]::Show(
     "无法加载 WPF 界面组件，本工具的图形界面需要 Windows 自带的 .NET Framework。`n`n原始错误：$($_.Exception.Message)",
@@ -40,6 +40,25 @@ if (-not (Test-Path -LiteralPath $script:scriptPath)) {
 $script:psExe = Join-Path $PSHOME "powershell.exe"
 if (-not (Test-Path -LiteralPath $script:psExe)) { $script:psExe = Join-Path $PSHOME "pwsh.exe" }
 if (-not (Test-Path -LiteralPath $script:psExe)) { $script:psExe = "powershell.exe" }
+
+# 若双击 `.exe` 启动，进程实际是 powershell.exe，任务栏默认会把本窗口归到
+# PowerShell 名下、显示它的图标。给进程一个独立的 AppUserModelID，Windows 才
+# 会把它当成单独的应用，配合下面设的 Window.Icon 就能显示工具自己的图标。
+# 必须在创建窗口之前调用。
+$script:appUserModelId = "onenote-export-tool"
+try {
+  Add-Type -Namespace NativeShell -Name AppId -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+public static extern int SetCurrentProcessExplicitAppUserModelID(string AppID);
+'@ -ErrorAction Stop
+} catch {
+  # 已经加载过同名类型时会走到这里，属正常情况
+}
+try {
+  [NativeShell.AppId]::SetCurrentProcessExplicitAppUserModelID($script:appUserModelId) | Out-Null
+} catch {
+  # 设不上只是任务栏图标可能被归组，不影响功能
+}
 
 # ── 界面 ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +136,59 @@ foreach ($n in @("nbCombo","secCombo","outBox","btnBrowse","btnOpen","btnRefresh
                  "forceChk","skipInkChk","bar","statusText","logList","btnStart","btnClose")) {
   Set-Variable -Name $n -Value $win.FindName($n) -Scope Script
 }
+
+# 从 .ico 文件读图标。用流而不是 UriSource：路径里可能带中文或空格，走流
+# 可以完全避开 URI 转义问题；CacheOption=OnLoad 保证读完就能关掉流。
+function Read-IconFromFile {
+  param([string]$Path)
+  $fs = [System.IO.File]::OpenRead($Path)
+  try {
+    $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
+    $bmp.BeginInit()
+    $bmp.StreamSource = $fs
+    $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+    $bmp.EndInit()
+    return $bmp
+  } finally { $fs.Dispose() }
+}
+
+# 从 exe 的内嵌资源取图标。只有 32x32，放大后略糊，但总好过没有。
+function Read-IconFromExe {
+  param([string]$Path)
+  $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($Path)
+  if (-not $ico) { return $null }
+  try {
+    # CreateBitmapSourceFromHIcon 会拷贝像素，之后销毁图标句柄是安全的
+    return [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
+      $ico.Handle, [System.Windows.Int32Rect]::Empty,
+      [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+  } finally { $ico.Dispose() }
+}
+
+function Set-WindowIcon {
+  $rootDir = Split-Path $PSScriptRoot -Parent
+  $icoPath = Join-Path $PSScriptRoot "launcher\icon.ico"
+  $exePath = Join-Path $rootDir "OneNote导出工具.exe"
+
+  # 优先用独立的 .ico：它含 16~256 全部尺寸，各 DPI 下都清晰
+  if (Test-Path -LiteralPath $icoPath) {
+    try {
+      $icon = Read-IconFromFile $icoPath
+      if ($icon) { $win.Icon = $icon; return }
+    } catch { }
+  }
+
+  # .ico 不在时退回 exe 的内嵌资源（仅 32x32）
+  if (Test-Path -LiteralPath $exePath) {
+    try {
+      $icon = Read-IconFromExe $exePath
+      if ($icon) { $win.Icon = $icon; return }
+    } catch { }
+  }
+  # 两者都不可用就沿用 WPF 默认图标，不影响使用
+}
+
+Set-WindowIcon
 
 # ── 状态 ────────────────────────────────────────────────────────────────────
 
