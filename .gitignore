@@ -11,5 +11,6 @@ Desktop.ini
 .vscode/
 .idea/
 
-# Serena（本地代码导航配置）
+# 本地代码配置
 .serena/
+.scratch

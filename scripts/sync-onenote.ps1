@@ -47,12 +47,17 @@
   诊断用：把每个页面的原始 OneNote XML 写到 <输出目录>/_xml/<页面>.xml。
   仅在排查坐标/ink/图片解析问题时使用 —— 这些文件不是给知识库导入的。
 
+.PARAMETER ProgressFile
+  内部参数，供 GUI 使用：把导出进度以 JSON Lines 追加写入该文件。
+  命令行使用时不必传。
+
 .EXAMPLE
   .\sync-onenote.ps1 -List
   .\sync-onenote.ps1 -OutputPath D:\onenote-export -Notebook "工作"
   .\sync-onenote.ps1 -OutputPath D:\onenote-export -Force
   .\sync-onenote.ps1 -OutputPath D:\onenote-xml -DumpXml -Notebook "学习笔记"
 #>
+[CmdletBinding()]
 param(
   [string]$OutputPath,
   [string]$Notebook,
@@ -63,6 +68,7 @@ param(
   [switch]$Help,
   [switch]$SkipInkImages,
   [switch]$DumpXml,
+  [string]$ProgressFile,
   [double]$InkToleranceRatio = 0.5,
   [double]$InkGapThreshold = 50
 )
@@ -128,8 +134,14 @@ $MaxSegmentChars = 80
 
 $manifestPath = Join-Path $PSScriptRoot ".onenote-export-manifest.json"
 
-function Write-Step([string]$Message) { Write-Host $Message }
-function Write-Warn2([string]$Message) { Write-Warning $Message }
+function Write-Step([string]$Message) {
+  Write-Host $Message
+  Write-ProgressEvent -Phase "log" -Done 0 -Total 0 -Message $Message
+}
+function Write-Warn2([string]$Message) {
+  Write-Warning $Message
+  Write-ProgressEvent -Phase "log-warn" -Done 0 -Total 0 -Message $Message
+}
 
 function Get-SafeSegment([string]$Name) {
   if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
@@ -913,6 +925,40 @@ function Convert-PageXmlToMarkdown {
 
 # ── 参数校验 ────────────────────────────────────────────────────────────────
 
+# GUI 以子进程方式调用本脚本（powershell.exe -File ... -ProgressFile <path>），
+# 由它读取进度；命令行调用时不传该参数，行为完全不变。
+function Write-ProgressEvent {
+  param([string]$Phase, [int]$Done, [int]$Total, [string]$Message = "", $Data)
+  if (-not $ProgressFile) { return }
+  try {
+    $evt = [ordered]@{
+      phase   = $Phase
+      done    = $Done
+      total   = $Total
+      message = $Message
+      time    = (Get-Date).ToString("HH:mm:ss")
+    }
+    if ($null -ne $Data) { $evt["data"] = @($Data) }
+    $json = $evt | ConvertTo-Json -Compress -Depth 6
+    # 追加写入：GUI 侧从头读到尾即可，无需知道文件是否被重写
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+    $fs = [System.IO.File]::Open($ProgressFile, [System.IO.FileMode]::Append,
+                                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+  } catch {
+    # 进度上报失败绝不能影响导出本身
+  }
+}
+
+# 顶层兜底：终止性错误（连不上 OneNote、层级读取失败等）也转成一条 progress
+# 事件，否则 GUI 只能看到退出码非 0、拿不到原因。CLI 侧同时把完整错误写到
+# stderr，与原先未捕获 throw 的表现一致。
+trap {
+  Write-ProgressEvent -Phase "error" -Done 0 -Total 0 -Message $_.Exception.Message
+  ($_ | Out-String).Trim() | ForEach-Object { [Console]::Error.WriteLine($_) }
+  exit 1
+}
+
 if (-not $List -and -not $ListNotebooks) {
   if (-not $OutputPath) {
     throw "缺少 -OutputPath 参数（导出目录）。若只想查看有哪些笔记本，加 -ListNotebooks；查看页面清单加 -List。"
@@ -1005,7 +1051,8 @@ function Add-AncestorPathSegments {
 
 if ($ListNotebooks) {
   # 只统计非回收站的页面，否则计数会与 -List 对不上
-  $rows = foreach ($nb in $hierarchyDoc.SelectNodes("//one:Notebook", $ns)) {
+  $nbNodes = @($hierarchyDoc.SelectNodes("//one:Notebook", $ns))
+  $rows = foreach ($nb in $nbNodes) {
     [PSCustomObject]@{
       笔记本 = $nb.name
       分区数 = $nb.SelectNodes(".//one:Section", $ns).Count
@@ -1016,12 +1063,25 @@ if ($ListNotebooks) {
 
   if (-not $rows) {
     Write-Step "未找到任何笔记本。请确认 OneNote 已登录并同步至少一个笔记本。"
-    exit 0
+    Write-ProgressEvent -Phase "error" -Done 0 -Total 0 `
+      -Message "未找到任何笔记本。请确认 OneNote 已登录并同步至少一个笔记本。"
+    exit 1
   }
 
   $rows | Format-Table -AutoSize
   Write-Step ""
-  Write-Step ("共 {0} 个笔记本。用 -Notebook <名称> 指定要导出的笔记本。" -f @($rows).Count)
+  Write-Step ("共 {0} 个笔记本。" -f @($rows).Count)
+
+  # 结构化数据供 GUI 填充下拉框：笔记本 → 其下所有分区名（去重）
+  $hierarchy = foreach ($nb in $nbNodes) {
+    [PSCustomObject]@{
+      name     = $nb.name
+      sections = @($nb.SelectNodes(".//one:Section", $ns) |
+                   ForEach-Object { $_.name } | Sort-Object -Unique)
+    }
+  }
+  Write-ProgressEvent -Phase "hierarchy" -Done @($rows).Count -Total @($rows).Count `
+    -Message ("共 {0} 个笔记本" -f @($rows).Count) -Data @($hierarchy)
   exit 0
 }
 
@@ -1162,10 +1222,14 @@ foreach ($p in $planned) {
 
 if ($toExport.Count -eq 0) {
   Write-Step ("OneNote 内容无变化，跳过导出（共 {0} 个页面）。" -f $planned.Count)
+  Write-ProgressEvent -Phase "up-to-date" -Done 0 -Total 0 `
+    -Message ("内容无变化，无需导出（共 {0} 个页面）。" -f $planned.Count)
   exit 0
 }
 
 Write-Step ("开始导出：{0} / {1} 个页面有更新。" -f $toExport.Count, $planned.Count)
+Write-ProgressEvent -Phase "start" -Done 0 -Total $toExport.Count `
+  -Message ("共 {0} 个页面待导出。" -f $toExport.Count)
 Write-Step ""
 
 # ── 导出 ────────────────────────────────────────────────────────────────────
@@ -1214,9 +1278,13 @@ foreach ($p in $toExport) {
     $totalInkFailures += $inkFailures
     $suffix = if ($inkFailures -gt 0) { "（$inkFailures 张手绘图渲染失败，已跳过）" } else { "" }
     Write-Step ("  [成功] {0}{1}" -f $p.RelFile, $suffix)
+    Write-ProgressEvent -Phase "page" -Done ($successCount + $failedPages.Count) `
+      -Total $toExport.Count -Message ("{0}{1}" -f $p.RelFile, $suffix)
   } catch {
     $failedPages.Add($p.RelFile)
     Write-Warn2 ("  [失败] {0} —— {1}" -f $p.RelFile, $_.Exception.Message)
+    Write-ProgressEvent -Phase "page" -Done ($successCount + $failedPages.Count) `
+      -Total $toExport.Count -Message ("{0} —— {1}" -f $p.RelFile, $_.Exception.Message)
   }
 }
 
@@ -1230,6 +1298,8 @@ $manifestJson = $manifestData | ConvertTo-Json -Depth 5
 
 Write-Step ""
 Write-Step ("完成：成功 {0} 个，失败 {1} 个。" -f $successCount, $failedPages.Count)
+Write-ProgressEvent -Phase "done" -Done $toExport.Count -Total $toExport.Count `
+  -Message ("成功 {0} 个，失败 {1} 个。" -f $successCount, $failedPages.Count)
 if ($totalInkFailures -gt 0) {
   Write-Step ("注意：另有 {0} 张手绘图渲染失败被跳过（页面本身已导出，只是缺这几张图）。" -f $totalInkFailures)
 }
