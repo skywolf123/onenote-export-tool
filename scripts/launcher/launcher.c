@@ -31,6 +31,12 @@
 #include <wchar.h>
 #include <stdio.h>
 
+/* MessageBoxW 在 user32 里。MinGW 默认就链接它，MSVC 不会 —— 必须显式要求，
+   否则报 LNK2019: unresolved external symbol __imp_MessageBoxW。 */
+#ifdef _MSC_VER
+#pragma comment(lib, "user32.lib")
+#endif
+
 #define APP_TITLE L"OneNote 导出工具"
 
 /* 弹一个错误框。启动阶段的失败没有别的途径能让用户看到原因 —— 这是个
