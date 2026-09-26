@@ -29,6 +29,7 @@ $outExe   = Join-Path $repoRoot "OneNote导出工具.exe"
 $icon    = Join-Path $here "icon.ico"
 $rcFile  = Join-Path $here "launcher.rc"
 $cFile   = Join-Path $here "launcher.c"
+$versionFile = Join-Path $repoRoot "VERSION"
 
 foreach ($f in @($cFile, $rcFile, $icon)) {
   if (-not (Test-Path -LiteralPath $f)) {
@@ -45,9 +46,28 @@ function Find-Tool {
   return $null
 }
 
+# 把 VERSION 里的版本号写进 exe 的版本资源，避免它和仓库版本各说各话。
+# VERSION 缺失或格式不对时退回 launcher.rc 里的默认值，不中断编译。
+$version = "1.0.0.0"
+if (Test-Path -LiteralPath $versionFile) {
+  $raw = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+  if ($raw -match '^(\d+)\.(\d+)\.(\d+)') {
+    $version = "{0}.{1}.{2}.0" -f $Matches[1], $Matches[2], $Matches[3]
+  }
+}
+Write-Host "版本资源：$version"
+
+# launcher.rc 里 FILEVERSION / PRODUCTVERSION 写成占位符，编译前替换成实际版本
+$rcText = (Get-Content -LiteralPath $rcFile -Raw) -replace '(FILEVERSION|PRODUCTVERSION)\s+\S+', '$1     ' + $version
+$rcText = $rcText -replace '("FileVersion",\s*)"[^"]*"', ('$1"' + $version + '"')
+$rcText = $rcText -replace '("ProductVersion",\s*)"[^"]*"', ('$1"' + $version + '"')
+
 # 编译产物不能与源文件混在一起，用临时目录
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("onenote-launcher-{0}" -f ([guid]::NewGuid().ToString("N")))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+
+$rcTmp = Join-Path $tmp "launcher.rc"
+Set-Content -LiteralPath $rcTmp -Value $rcText -Encoding UTF8
 
 try {
   $gcc     = Find-Tool @("x86_64-w64-mingw32-gcc.exe", "gcc.exe")
@@ -59,7 +79,7 @@ try {
     Write-Host "使用 MinGW-w64 编译…"
 
     $resObj = Join-Path $tmp "launcher_res.o"
-    & $windres -I $here -i $rcFile -o $resObj
+    & $windres -I $here -I $tmp -i $rcTmp -o $resObj
     if ($LASTEXITCODE -ne 0) { throw "windres 失败（退出码 $LASTEXITCODE）" }
 
     # -municode：宽字符入口 wWinMain
@@ -78,7 +98,7 @@ try {
     Write-Host "使用 MSVC 编译…"
 
     $resFile = Join-Path $tmp "launcher.res"
-    & $rc /nologo /fo $resFile $rcFile
+    & $rc /nologo /fo $resFile $rcTmp
     if ($LASTEXITCODE -ne 0) { throw "rc 失败（退出码 $LASTEXITCODE）" }
 
     # /O1 体积优先；/MT 静态链接 CRT，避免依赖 VC 运行库

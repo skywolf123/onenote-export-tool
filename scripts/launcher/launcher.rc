@@ -6,6 +6,9 @@
    （16/24/32/48/64/128/256）都收进去，资源管理器会按需挑选。 */
 1 ICON "icon.ico"
 
+/* 下面两个版本号和 StringFileInfo 里的字符串版本，由 build-exe.ps1 在编译前
+   按仓库根目录的 VERSION 文件替换，这里的值只是占位（也是拿不到 VERSION 时
+   的兜底）。改版本号请改 VERSION，不要只改这里。 */
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
 PRODUCTVERSION  1,0,0,0

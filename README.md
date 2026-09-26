@@ -1,5 +1,7 @@
 # OneNote Export Tool
 
+当前版本：**1.0.0**（见 [CHANGELOG.zh.md](CHANGELOG.zh.md)）
+
 把本机 OneNote 笔记本导出成 Markdown 文件夹树，便于导入各类知识库。
 
 通过官方 OneNote COM 接口（`OneNote.Application`）直接读取本机已同步的笔记，
@@ -100,6 +102,9 @@
 # 在仓库根目录
 powershell -ExecutionPolicy Bypass -File scripts\launcher\build-exe.ps1
 ```
+
+版本号取自仓库根目录的 `VERSION`，编译脚本会自动写进 exe 的版本资源，
+不用手动同步。
 
 图标由 Pillow 生成，只有要重新设计图标时才需要跑（`icon.ico` 已随仓库提供）：
 
