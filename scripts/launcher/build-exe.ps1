@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   在 Windows 上编译根目录的「OneNote导出工具.exe」启动器。
 
@@ -17,6 +17,9 @@
   # 在仓库根目录
   powershell -ExecutionPolicy Bypass -File scripts\launcher\build-exe.ps1
 #>
+# 注意：本文件必须以「UTF-8 带 BOM」保存。PowerShell 5.1 读无 BOM 的 .ps1 时
+# 按系统 ANSI 代码页解码，文件里的中文会变成乱码，进而引发一连串语法错误
+# （症状是报「意外的标记」并指出一行乱码）。改这个文件后请确认 BOM 还在。
 [CmdletBinding()]
 param()
 
@@ -47,7 +50,7 @@ function Find-Tool {
 }
 
 # 把 VERSION 里的版本号写进 exe 的版本资源，避免它和仓库版本各说各话。
-# VERSION 缺失或格式不对时退回 launcher.rc 里的默认值，不中断编译。
+# VERSION 缺失或格式不对时退回默认值，不中断编译。
 $version = "1.0.0.0"
 if (Test-Path -LiteralPath $versionFile) {
   $raw = (Get-Content -LiteralPath $versionFile -Raw).Trim()
@@ -55,10 +58,13 @@ if (Test-Path -LiteralPath $versionFile) {
     $version = "{0}.{1}.{2}.0" -f $Matches[1], $Matches[2], $Matches[3]
   }
 }
+# 资源脚本的 FILEVERSION / PRODUCTVERSION 必须是逗号分隔的四段数字，
+# 写成 "1.0.0.0" 会编译失败；字符串版本才用点号。
+$versionComma = $version -replace '\.', ','
 Write-Host "版本资源：$version"
 
 # launcher.rc 里 FILEVERSION / PRODUCTVERSION 写成占位符，编译前替换成实际版本
-$rcText = (Get-Content -LiteralPath $rcFile -Raw) -replace '(FILEVERSION|PRODUCTVERSION)\s+\S+', '$1     ' + $version
+$rcText = (Get-Content -LiteralPath $rcFile -Raw) -replace '(FILEVERSION|PRODUCTVERSION)\s+\S+', ('$1     ' + $versionComma)
 $rcText = $rcText -replace '("FileVersion",\s*)"[^"]*"', ('$1"' + $version + '"')
 $rcText = $rcText -replace '("ProductVersion",\s*)"[^"]*"', ('$1"' + $version + '"')
 
@@ -66,8 +72,11 @@ $rcText = $rcText -replace '("ProductVersion",\s*)"[^"]*"', ('$1"' + $version + 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("onenote-launcher-{0}" -f ([guid]::NewGuid().ToString("N")))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
+# 临时 .rc 必须写成 UTF-8 无 BOM：资源编译器按 ANSI 代码页解析无 BOM 文件，
+# 但写成带 BOM 又会被 windres 当成非法字符。这里只保留 ASCII 内容（版本号、
+# 路径），本来就不含中文，所以无 BOM 的 UTF-8 是安全的。
 $rcTmp = Join-Path $tmp "launcher.rc"
-Set-Content -LiteralPath $rcTmp -Value $rcText -Encoding UTF8
+[System.IO.File]::WriteAllText($rcTmp, $rcText, (New-Object System.Text.UTF8Encoding($false)))
 
 try {
   $gcc     = Find-Tool @("x86_64-w64-mingw32-gcc.exe", "gcc.exe")
@@ -79,7 +88,13 @@ try {
     Write-Host "使用 MinGW-w64 编译…"
 
     $resObj = Join-Path $tmp "launcher_res.o"
-    & $windres -I $here -I $tmp -i $rcTmp -o $resObj
+    # 工作目录设到 $here：launcher.rc 里写的是相对路径 icon.ico
+    Push-Location $here
+    try {
+      & $windres -I $here -I $tmp -i $rcTmp -o $resObj
+    } finally {
+      Pop-Location
+    }
     if ($LASTEXITCODE -ne 0) { throw "windres 失败（退出码 $LASTEXITCODE）" }
 
     # -municode：宽字符入口 wWinMain
@@ -98,7 +113,13 @@ try {
     Write-Host "使用 MSVC 编译…"
 
     $resFile = Join-Path $tmp "launcher.res"
-    & $rc /nologo /fo $resFile $rcTmp
+    # rc.exe 同样按工作目录解析 launcher.rc 里的相对路径 icon.ico
+    Push-Location $here
+    try {
+      & $rc /nologo /fo $resFile $rcTmp
+    } finally {
+      Pop-Location
+    }
     if ($LASTEXITCODE -ne 0) { throw "rc 失败（退出码 $LASTEXITCODE）" }
 
     # /O1 体积优先；/MT 静态链接 CRT，避免依赖 VC 运行库
