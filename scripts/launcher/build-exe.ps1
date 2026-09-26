@@ -40,11 +40,50 @@ foreach ($f in @($cFile, $rcFile, $icon)) {
   }
 }
 
+# 编译器可能装在 PATH 之外（Scoop、winget、MSYS2 的默认位置都不一定进 PATH），
+# 所以除了 Get-Command 之外再扫一遍这些目录兜底。
+function Get-CandidateToolDirs {
+  $dirs = @(
+    "C:\msys64\mingw64\bin"
+    "C:\msys64\ucrt64\bin"
+    "C:\msys64\clang64\bin"
+    "C:\w64devkit\bin"
+    (Join-Path $env:ProgramFiles "Git\mingw64\bin")
+    (Join-Path $env:ProgramFiles "mingw-w64\mingw64\bin")
+    (Join-Path $env:USERPROFILE "scoop\apps\mingw\current\bin")
+    (Join-Path $env:LOCALAPPDATA "Programs\mingw\bin")
+  )
+
+  # winget 安装的 winlibs 落在带哈希的包目录里，路径不固定，用通配展开
+  $globs = @(
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\*\mingw64\bin")
+    (Join-Path $env:ProgramFiles "mingw-w64\*\mingw64\bin")
+  )
+  foreach ($g in $globs) {
+    try {
+      $dirs += @(Get-ChildItem -Path $g -Directory -ErrorAction SilentlyContinue |
+                 ForEach-Object { $_.FullName })
+    } catch { }
+  }
+
+  return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+}
+
 function Find-Tool {
   param([string[]]$Names)
+
+  # 先走 PATH —— 大多数正常安装都能命中
   foreach ($n in $Names) {
     $cmd = Get-Command $n -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+  }
+
+  # 再扫常见安装位置
+  foreach ($dir in (Get-CandidateToolDirs)) {
+    foreach ($n in $Names) {
+      $p = Join-Path $dir $n
+      if (Test-Path -LiteralPath $p) { return $p }
+    }
   }
   return $null
 }
@@ -86,6 +125,8 @@ try {
 
   if ($gcc -and $windres) {
     Write-Host "使用 MinGW-w64 编译…"
+    Write-Host ("  gcc:     {0}" -f $gcc)
+    Write-Host ("  windres: {0}" -f $windres)
 
     $resObj = Join-Path $tmp "launcher_res.o"
     # 工作目录设到 $here：launcher.rc 里写的是相对路径 icon.ico
@@ -111,6 +152,8 @@ try {
   }
   elseif ($cl -and $rc) {
     Write-Host "使用 MSVC 编译…"
+    Write-Host ("  cl: {0}" -f $cl)
+    Write-Host ("  rc: {0}" -f $rc)
 
     $resFile = Join-Path $tmp "launcher.res"
     # rc.exe 同样按工作目录解析 launcher.rc 里的相对路径 icon.ico
@@ -136,13 +179,30 @@ try {
     # cl 会把中间文件写到当前目录，临时目录随用随删，不污染仓库
   }
   else {
+    $searched = @("PATH")
+    $searched += (Get-CandidateToolDirs)
+    $searchedText = ($searched | ForEach-Object { "  " + $_ }) -join "`n"
+
     throw @"
-找不到可用的 C 编译器。请任选一套装好再试：
+找不到可用的 C 编译器（需要 gcc + windres，或 cl + rc）。
+
+已查找的位置：
+$searchedText
+
+请任选一套装好再试：
 
   MinGW-w64（推荐，体积小）
     - Scoop:  scoop install mingw
+    - winget: winget install BrechtSanders.WinLibs.POSIX.UCRT
     - MSYS2:  pacman -S mingw-w64-ucrt-x86_64-gcc
-    - w64devkit: 解压后把 bin 目录加进 PATH
+    - w64devkit: 解压到 C:\w64devkit 即可，本脚本会自动找到
+
+  已经装了 MinGW-w64 但没被找到？
+    如果它在别的位置，把该目录加进本次会话的 PATH 再重跑：
+      `$env:PATH = "D:\你的\mingw64\bin;`$env:PATH"
+      powershell -ExecutionPolicy Bypass -File scripts\launcher\build-exe.ps1
+    注意：如果这个 gcc 不在 PATH 里，脚本也找不到它的 windres，
+    两个工具必须来自同一个 bin 目录。
 
   MSVC
     - 安装 Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」
