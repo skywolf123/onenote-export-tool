@@ -2,13 +2,18 @@
 
 #include <windows.h>
 
+/* 本文件以 UTF-8 保存，且下面有中文（InternalName / OriginalFilename）。
+   rc.exe 默认按系统代码页解码，在非中文系统上会变成乱码，必须显式声明。
+   windres 本身默认就按 UTF-8 读，这个 pragma 对它无害。 */
+#pragma code_page(65001)
+
 /* IDI_APPICON = 1，供 LoadIcon 使用；Windres 会把 icon.ico 里的全部尺寸
    （16/24/32/48/64/128/256）都收进去，资源管理器会按需挑选。 */
 1 ICON "icon.ico"
 
-/* 下面两个版本号和 StringFileInfo 里的字符串版本，由 build-exe.ps1 在编译前
-   按仓库根目录的 VERSION 文件替换，这里的值只是占位（也是拿不到 VERSION 时
-   的兜底）。改版本号请改 VERSION，不要只改这里。 */
+/* 下面两个版本号和 StringFileInfo 里的字符串版本，由 CI 在编译前按仓库根目录
+   的 VERSION 文件替换，这里的值只是占位（也是拿不到 VERSION 时的兜底）。
+   改版本号请改 VERSION，不要只改这里。 */
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
 PRODUCTVERSION  1,0,0,0

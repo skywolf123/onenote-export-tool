@@ -1,0 +1,245 @@
+name: Release
+
+# tag 推送 → 编译 exe + 打 zip + 发 Release
+# 改启动器源码的 PR → 只编译，验证能过
+# 手动触发 → 只编译 + 上传 artifact，不发 Release
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'scripts/launcher/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+# gh release create/upload 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 配置 MSVC 环境 ────────────────────────────────────────────────
+      # windows-latest 预装 Visual Studio 的 C++ 工具，但 cl.exe 不在 PATH 上，
+      # 必须先进 vcvars 环境。用 vswhere 定位（系统自带，不引入第三方 action），
+      # 再把变量写进 GITHUB_ENV 供后续步骤使用。
+      - name: 配置 MSVC 环境
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "找不到 vswhere：$vswhere" }
+
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsPath) { throw "找不到带 C++ 工具的 Visual Studio" }
+
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "找不到 vcvars64.bat：$vcvars" }
+
+          # `set` 的输出里可能有以 = 开头的行（当前盘符目录），必须滤掉
+          cmd /c "`"$vcvars`" >nul 2>&1 && set" |
+            Where-Object { $_ -match '^[^=]+=' } |
+            ForEach-Object {
+              $i = $_.IndexOf('=')
+              $k = $_.Substring(0, $i)
+              $v = $_.Substring($i + 1)
+              Add-Content -LiteralPath $env:GITHUB_ENV -Value "$k=$v"
+            }
+
+          Write-Host "MSVC 环境已就绪：$vsPath"
+
+      # ── 编译 ──────────────────────────────────────────────────────────
+      # 版本号从 VERSION 注入 launcher.rc，保证 exe 属性与仓库版本一致。
+      # rc.exe 默认按系统代码页解码，而 launcher.rc 含中文，这里显式转成
+      # UTF-16LE（带 BOM）—— rc.exe 认得，避免在英文 runner 上出乱码。
+      - name: 编译启动器
+        shell: pwsh
+        run: |
+          $exe = "OneNote导出工具.exe"
+
+          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION 内容不像版本号：$version" }
+          $quad = "$version.0"
+          Write-Host "版本资源：$quad"
+
+          $rc = Get-Content -LiteralPath scripts/launcher/launcher.rc -Raw
+          $rc = $rc -replace '(FILEVERSION|PRODUCTVERSION)\s+\S+', ('$1     ' + $quad)
+          $rc = $rc -replace '("FileVersion",\s*)"[^"]*"',    ('$1"' + $quad + '"')
+          $rc = $rc -replace '("ProductVersion",\s*)"[^"]*"', ('$1"' + $quad + '"')
+
+          $rcTmp = Join-Path $env:RUNNER_TEMP "launcher.rc"
+          Set-Content -LiteralPath $rcTmp -Value $rc -Encoding Unicode
+
+          # 在 scripts/launcher 下编译：launcher.rc 里的 "icon.ico" 是相对路径，
+          # 需要以该目录为工作目录才能找到。中间产物留在那里即可 —— CI 的
+          # 工作区是一次性的。
+          Push-Location scripts/launcher
+          try {
+            & rc /nologo /fo "$env:RUNNER_TEMP\launcher.res" $rcTmp
+            if ($LASTEXITCODE -ne 0) { throw "rc 失败（退出码 $LASTEXITCODE）" }
+
+            # /O1 体积优先；/MT 静态链接 CRT，避免依赖 VC 运行库
+            & cl /nologo /O1 /MT /GS- /DUNICODE /D_UNICODE `
+              launcher.c "$env:RUNNER_TEMP\launcher.res" `
+              "/Fe:$env:GITHUB_WORKSPACE\$exe" `
+              /link /SUBSYSTEM:WINDOWS /INCREMENTAL:NO
+            if ($LASTEXITCODE -ne 0) { throw "cl 失败（退出码 $LASTEXITCODE）" }
+          } finally {
+            Pop-Location
+          }
+
+          if (-not (Test-Path -LiteralPath $exe)) { throw "编译没有产出 $exe" }
+
+          $info = Get-Item -LiteralPath $exe
+          $ver  = $info.VersionInfo.FileVersion
+          $kb   = [Math]::Round($info.Length / 1KB)
+          Write-Host ("产物：{0}（{1} KB，版本 {2}）" -f $exe, $kb, $ver)
+
+          if ($ver -ne $quad) { throw "exe 版本资源是 $ver，期望 $quad" }
+
+          # 不用 here-string：YAML 的块标量里 " 必须顶格，会把缩进弄乱
+          $summary = @(
+            '### 启动器编译成功'
+            ''
+            '| 项 | 值 |'
+            '| :--- | :--- |'
+            "| 文件 | ``$exe`` |"
+            "| 大小 | $kb KB |"
+            "| 版本 | $ver |"
+          ) -join "`n"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      # ── 打包 ──────────────────────────────────────────────────────────
+      # zip 里必须带上 scripts/ —— exe 只是启动器，真正干活的是
+      # scripts/export-gui.ps1，单独一个 exe 拿出去是跑不起来的。
+      - name: 打包 zip
+        id: pack
+        shell: pwsh
+        run: |
+          # 版本号：tag 推送用 tag，其他情况用 VERSION 文件
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          }
+          $pkgName = "onenote-export-tool-$version"
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "$pkgName.zip"
+
+          # 暂存目录：只放运行时需要的文件，不含 .git/.github/本地配置
+          $stage = Join-Path $env:RUNNER_TEMP $pkgName
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          foreach ($item in @("OneNote导出工具.exe", "README.md", "LICENSE",
+                              "CHANGELOG.md", "CHANGELOG.zh.md", "VERSION")) {
+            if (-not (Test-Path -LiteralPath $item)) { throw "缺少待打包文件：$item" }
+            Copy-Item -LiteralPath $item -Destination $stage
+          }
+
+          # scripts/ 整个带上（含 launcher 源码，用户想改启动器可以直接改），
+          # 但排掉编译中间产物
+          Copy-Item -LiteralPath "scripts" -Destination $stage -Recurse
+          Get-ChildItem -LiteralPath (Join-Path $stage "scripts\launcher") -File |
+            Where-Object { $_.Extension -in @('.obj', '.res', '.o') } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+          # ── 压缩 ──
+          # 用 7-Zip 而不是 Compress-Archive：后者写非 ASCII 文件名时不设 UTF-8
+          # 标志位，Windows 资源管理器解压会得到乱码文件名（exe 名是中文）。
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            $cmd = Get-Command 7z.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $sevenZip = $cmd.Source }
+          }
+
+          Push-Location $env:RUNNER_TEMP
+          try {
+            if (Test-Path -LiteralPath $sevenZip) {
+              & $sevenZip a -tzip -mx=9 $zipPath $pkgName | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "7-Zip 打包失败（退出码 $LASTEXITCODE）" }
+            } else {
+              Write-Warning "未找到 7-Zip，退回 Compress-Archive —— 中文文件名可能在解压时乱码"
+              Compress-Archive -Path $pkgName -DestinationPath $zipPath -CompressionLevel Optimal
+            }
+          } finally {
+            Pop-Location
+          }
+
+          Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "已打包：$zipPath"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            Write-Host "内容清单："
+            $zip.Entries | ForEach-Object { Write-Host ("  {0}  ({1} B)" -f $_.FullName, $_.Length) }
+          } finally { $zip.Dispose() }
+
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "zip=$zipPath"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$pkgName"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: ${{ steps.pack.outputs.zip }}
+          if-no-files-found: error
+
+      # ── 发 Release（仅 tag 推送） ──────────────────────────────────────
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag     = $env:GITHUB_REF_NAME
+          $version = "${{ steps.pack.outputs.version }}"
+          $zipPath = "${{ steps.pack.outputs.zip }}"
+
+          # Release 正文取自 CHANGELOG.md 里该版本的段落
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          $notes = $null
+          if (Test-Path -LiteralPath "CHANGELOG.md") {
+            $text = Get-Content -LiteralPath "CHANGELOG.md" -Raw
+            $pattern = "(?ms)^##\s+v?$([regex]::Escape($version))\b.*?(?=^##\s|\z)"
+            $m = [regex]::Match($text, $pattern)
+            if ($m.Success) { $notes = $m.Value.Trim() }
+          }
+
+          if ($notes) {
+            Set-Content -LiteralPath $notesFile -Value $notes -Encoding UTF8
+            Write-Host "Release 正文取自 CHANGELOG.md 的 $version 段落"
+          } else {
+            Write-Warning "CHANGELOG.md 里没有 $version 的段落，正文将自动生成"
+          }
+
+          # Release 可能已手工建过，这时只补传附件
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+
+          if ($exists) {
+            Write-Host "Release $tag 已存在，上传附件"
+            gh release upload $tag $zipPath --clobber
+            if ($LASTEXITCODE -ne 0) { throw "上传附件失败（退出码 $LASTEXITCODE）" }
+            if ($notes) {
+              gh release edit $tag --title $tag --notes-file $notesFile
+              if ($LASTEXITCODE -ne 0) { throw "更新 Release 正文失败（退出码 $LASTEXITCODE）" }
+            }
+          } else {
+            Write-Host "创建 Release $tag"
+            if ($notes) {
+              gh release create $tag --title $tag --notes-file $notesFile --verify-tag $zipPath
+            } else {
+              gh release create $tag --title $tag --generate-notes --verify-tag $zipPath
+            }
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败（退出码 $LASTEXITCODE）" }
+          }
+
+          Write-Host "完成：$tag 已附带 $([System.IO.Path]::GetFileName($zipPath))"

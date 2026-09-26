@@ -2,6 +2,12 @@
 .onenote-export-manifest.json
 *.log
 
+# 编译产物（由 CI 编译并发到 Release，仓库不存二进制）
+OneNote导出工具.exe
+scripts/launcher/*.obj
+scripts/launcher/*.res
+scripts/launcher/*.o
+
 # OS specific
 Thumbs.db
 Desktop.ini

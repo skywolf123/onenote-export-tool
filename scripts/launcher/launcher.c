@@ -14,7 +14,9 @@
  * 用原生代码而不是 PowerShell + ps2exe 之类打包，是为了让产物不依赖任何
  * 运行时、体积极小，也不会被某些杀软当成「脚本打包器」误报。
  *
- * 编译：见 scripts/build-exe.sh
+ * 编译：由 GitHub Actions 在推送 tag 时自动完成，见
+ * .github/workflows/release.yml。仓库里不存放 exe 二进制，改这里只需推一个
+ * tag，CI 会编译并把 zip 发到 Release。
  */
 
 /* -municode 已经在命令行上定义了 UNICODE/_UNICODE，这里加守卫避免重定义警告 */

@@ -35,7 +35,7 @@
 | **中文界面**            | 输出信息、错误提示、无标题页的兜底命名全部本地化                                                                                                                                   |
 | **移除 Obsidian 集成**  | 删除插件壳（`main.js` / `manifest.json` / `package.json`）与单页导出脚本                                                                                                           |
 | **不再删除旧文件**      | 保留"跳过未变化页面"的增量能力，但去掉改名/删除时清理旧文件的行为 —— 对"导出一个目录去上传"的用途无意义且有误删风险                                                                |
-| **新增图形界面**        | 根目录的 `OneNote导出工具.exe`（双击即用）+ `scripts/export-gui.ps1`（WPF 界面本体）：选笔记本、分区、导出目录，点一下就跑，不需要命令行                                           |
+| **新增图形界面**        | 根目录的 `OneNote导出工具.exe`（双击即用）+ `scripts/export-gui.ps1`（WPF 界面本体）：选笔记本、分区、导出目录，点一下就跑，不需要命令行。exe 由 CI 编译，见 [Releases](https://github.com/skywolf123/onenote-export-tool/releases)                                           |
 
 ## 环境要求
 
@@ -47,7 +47,9 @@
 
 ## 图形界面
 
-不熟悉命令行的用户，直接**双击根目录的 `OneNote导出工具.exe`** 即可：
+**先到 [Releases](https://github.com/skywolf123/onenote-export-tool/releases) 下载
+最新版的 zip，解压到本地磁盘**（不要在压缩包里直接运行，也不要放在网络位置），
+然后双击解压目录里的 `OneNote导出工具.exe`：
 
 ```
 ┌─ OneNote 导出工具 ──────────────────────────────┐
@@ -75,15 +77,15 @@
 - 导出进行中关闭窗口会二次确认，避免误触中断
 - 窗口图标与 `.exe` 一致（都取自 `scripts/launcher/icon.ico`）
 
-**保持文件夹结构完整**：`.exe` 需要和 `scripts\` 目录在一起，不能单独拷出去。
-它只是个启动器（41 KB，无运行时依赖），负责用系统自带的 Windows PowerShell
-拉起 `scripts\export-gui.ps1`；界面逻辑都在那个脚本里。
+**不要单独拷走 `.exe`**：它需要和同目录的 `scripts\` 一起才能工作。它只是个
+启动器（约 41 KB，无运行时依赖），负责用系统自带的 Windows PowerShell 拉起
+`scripts\export-gui.ps1`；界面逻辑都在那个脚本里。
 
 界面本身也不重复实现导出逻辑，它把参数交给 `sync-onenote.ps1` 在子进程里跑，
 所以行为与命令行完全一致。
 
-> 若双击 `.exe` 无反应，多半是文件夹被搬动过、`.exe` 与 `scripts\` 分离了 ——
-> 启动器会在这种时候弹一个提示框说明原因。
+> 若双击 `.exe` 无反应，多半是 `.exe` 与 `scripts\` 分离了 —— 启动器会在这种
+> 时候弹一个提示框说明原因。
 
 ### 首次运行提示「Windows 已保护你的电脑」
 
@@ -91,29 +93,24 @@
 未签名程序的统一行为，不是本工具有什么问题。点框里的「**更多信息**」→
 「**仍要运行**」即可。
 
-### 重新编译启动器
+### 启动器是怎么来的
 
-`.exe` 是编译出来的产物，源码在 `scripts/launcher/`。只有改启动器逻辑或换图标
-才需要重新编译 —— 改界面（`export-gui.ps1`）不用。
+启动器刻意用原生 C 写（`scripts/launcher/launcher.c`），不用 ps2exe 之类打包，
+这样产物无运行时依赖、体积极小，也不会被某些杀软当成「脚本打包器」误报。
 
-在 **Windows** 上编译（需要 MinGW-w64 或 MSVC，见脚本内的安装提示）：
+它由 GitHub Actions 在推送 tag 时自动编译并打包发布，见
+[`.github/workflows/release.yml`](.github/workflows/release.yml)。
+仓库里**不存放 exe 二进制**，避免它与版本脱节。
 
-```powershell
-# 在仓库根目录
-powershell -ExecutionPolicy Bypass -File scripts\launcher\build-exe.ps1
-```
-
-版本号取自仓库根目录的 `VERSION`，编译脚本会自动写进 exe 的版本资源，
-不用手动同步。
-
-图标由 Pillow 生成，只有要重新设计图标时才需要跑（`icon.ico` 已随仓库提供）：
+- **改界面**（`export-gui.ps1`）：不需要重新编译，改完直接生效
+- **改启动器**（`launcher.c` / `launcher.rc`）：推一个 tag 即可由 CI 编译发布
+- **换图标**：重新生成 `icon.ico` 后推 tag。生成脚本需要 Pillow：
 
 ```bash
 uv run --with pillow python3 scripts/launcher/make-icon.py
 ```
 
-启动器刻意用原生 C 写、不用 ps2exe 之类打包，这样产物无运行时依赖、体积极小，
-也不会被某些杀软当成「脚本打包器」误报。
+exe 的版本资源取自仓库根目录的 `VERSION`，CI 编译时注入，不用手动同步。
 
 ## 命令行用法
 
